@@ -1,0 +1,22 @@
+# Build
+build/
+out/
+
+# Gradle
+.gradle/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.settings/
+.classpath
+.project
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+DEVELOPMENT_CONTEXT.md

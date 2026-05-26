@@ -1,0 +1,5 @@
+modules:
+  scheduler-compat: true
+  thread-safe-state: true
+  entity-bridge: true
+  main-thread-proxy: true

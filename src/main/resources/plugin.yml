@@ -1,0 +1,32 @@
+name: FoliaCompat
+version: '${version}'
+main: com.foliacompat.FoliaCompatPlugin
+api-version: '1.21'
+load: STARTUP
+description: Paper/Folia plugin compatibility middleware - adapts single-threaded plugins to Folia's regionized multithreading
+author: FoliaCompat
+website: https://github.com/foliacompat
+
+folia-supported: true
+
+# 可选：命令和权限
+commands:
+  foliacompat:
+    description: FoliaCompat admin commands
+    usage: /foliacompat [reload|status|info]
+    permission: foliacompat.admin
+
+permissions:
+  foliacompat.admin:
+    description: Allows FoliaCompat admin commands
+    default: op
+  foliacompat.status:
+    description: View compatibility status
+    default: true
+
+# 模块配置
+modules:
+  scheduler-compat: true
+  thread-safe-state: true
+  entity-bridge: true
+  main-thread-proxy: true
