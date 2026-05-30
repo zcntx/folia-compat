@@ -33,6 +33,7 @@ public class SchedulerTransformer implements ClassFileTransformer {
 
     private static final byte[] GET_SCHEDULER_PATTERN = "getScheduler".getBytes();
     private static final byte[] IS_PRIMARY_THREAD_PATTERN = "isPrimaryThread".getBytes();
+    private static final byte[] REGISTER_NEW_TEAM_PATTERN = "registerNewTeam".getBytes();
 
     /**
      * Classes allowed even if they match an excluded prefix.
@@ -71,6 +72,27 @@ public class SchedulerTransformer implements ClassFileTransformer {
             "co/aikar/"
     };
 
+    // Folia native plugin prefixes - these plugins already support Folia natively
+    // and should not be transformed by FoliaCompat
+    private static final String[] FOLIA_NATIVE_PREFIXES = {
+            "me/clip/placeholderapi/",
+            "net/citizensnpcs/",
+            "me/neznamy/tab/",
+            "net/coreprotect/",
+            "org/popcraft/chunky/",
+            "ac/grim/grimac/",
+            "com/github/retrooper/packetevents/",
+            "wtf/chor/veinminer/",
+            "net/playeranalytics/plan/",
+            "de/gesundkrank/gsit/",
+            "com/artillexx/axgraves/",
+            "com/fastasyncworldedit/",
+            "com/sk89q/worldguard/",
+            "github/scarsz/discordsrv/",
+            "com/dfsek/terra/",
+            "net/ims/orebfuscator/"
+    };
+
     @Override
     public byte[] transform(ClassLoader loader, String className, Class<?> classBeingRedefined,
                             ProtectionDomain protectionDomain, byte[] classfileBuffer) {
@@ -81,6 +103,11 @@ public class SchedulerTransformer implements ClassFileTransformer {
             for (String prefix : EXCLUDED_PREFIXES) {
                 if (className.startsWith(prefix)) return null;
             }
+        }
+
+        // Skip Folia native plugins - they already support Folia natively
+        for (String prefix : FOLIA_NATIVE_PREFIXES) {
+            if (className.startsWith(prefix)) return null;
         }
 
         // Fast bytecode scan
@@ -106,7 +133,8 @@ public class SchedulerTransformer implements ClassFileTransformer {
 
     private static boolean containsTargetMethod(byte[] classfileBuffer) {
         return indexOf(classfileBuffer, GET_SCHEDULER_PATTERN) >= 0
-                || indexOf(classfileBuffer, IS_PRIMARY_THREAD_PATTERN) >= 0;
+                || indexOf(classfileBuffer, IS_PRIMARY_THREAD_PATTERN) >= 0
+                || indexOf(classfileBuffer, REGISTER_NEW_TEAM_PATTERN) >= 0;
     }
 
     private static int indexOf(byte[] data, byte[] pattern) {
@@ -176,6 +204,25 @@ public class SchedulerTransformer implements ClassFileTransformer {
                             "com/foliacompat/thread/MainThreadProxy",
                             "isPrimaryThread",
                             "()Z",
+                            false
+                    );
+                    modified = true;
+                    return;
+                }
+
+                // Intercept Scoreboard.registerNewTeam(String) calls
+                // This fixes PowerRanks and similar plugins that register teams
+                // from non-global-tick threads (throws UnsupportedOperationException in Folia)
+                if ((opcode == Opcodes.INVOKEINTERFACE || opcode == Opcodes.INVOKEVIRTUAL)
+                        && "registerNewTeam".equals(name)
+                        && "(Ljava/lang/String;)Lorg/bukkit/scoreboard/Team;".equals(descriptor)
+                        && ("org/bukkit/scoreboard/Scoreboard".equals(owner) || "org/bukkit/craftbukkit/scoreboard/CraftScoreboard".equals(owner))) {
+
+                    super.visitMethodInsn(
+                            Opcodes.INVOKESTATIC,
+                            "com/foliacompat/compat/ScoreboardCompat",
+                            "safeRegisterTeam",
+                            "(Ljava/lang/String;)Lorg/bukkit/scoreboard/Team;",
                             false
                     );
                     modified = true;

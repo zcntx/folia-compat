@@ -1,5 +1,7 @@
 package com.foliacompat;
 
+import com.foliacompat.compat.ScoreboardCompat;
+import com.foliacompat.compat.ThreadContextBridge;
 import com.foliacompat.entity.CrossRegionEntityBridge;
 import com.foliacompat.scheduler.CompatScheduler;
 import com.foliacompat.scheduler.CompatSchedulerHolder;
@@ -14,8 +16,6 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
-import java.util.logging.Level;
 import java.util.logging.Logger;
 
 public class FoliaCompatPlugin extends JavaPlugin implements Listener {
@@ -23,11 +23,13 @@ public class FoliaCompatPlugin extends JavaPlugin implements Listener {
     private static FoliaCompatPlugin instance;
     private boolean foliaEnvironment = false;
 
-    // 模块开关
+    // Module toggles
     private boolean enableSchedulerCompat = true;
     private boolean enableThreadSafeState = true;
     private boolean enableEntityBridge = true;
     private boolean enableMainThreadProxy = true;
+    private boolean enableScoreboardCompat = true;
+    private boolean enableThreadContextBridge = true;
 
     @Override
     public void onLoad() {
@@ -48,7 +50,7 @@ public class FoliaCompatPlugin extends JavaPlugin implements Listener {
         logger.info("  Paper/Folia Plugin Compatibility Layer");
         logger.info("========================================");
 
-        // 检测运行环境
+        // Detect environment
         foliaEnvironment = FoliaDetector.isFolia();
         if (foliaEnvironment) {
             logger.info("Environment: Folia detected - activating full compatibility layer");
@@ -57,7 +59,7 @@ public class FoliaCompatPlugin extends JavaPlugin implements Listener {
             logger.info("Some features will not be activated on non-Folia servers.");
         }
 
-        // 注册事件监听
+        // Register event listeners
         Bukkit.getPluginManager().registerEvents(this, this);
 
         // Install MainThreadProxy
@@ -69,6 +71,16 @@ public class FoliaCompatPlugin extends JavaPlugin implements Listener {
         saveDefaultConfig();
         loadConfiguration();
 
+        // Initialize new compat modules
+        if (foliaEnvironment) {
+            if (enableScoreboardCompat) {
+                ScoreboardCompat.initialize();
+            }
+            if (enableThreadContextBridge) {
+                ThreadContextBridge.initialize();
+            }
+        }
+
         logger.info("FoliaCompat enabled successfully!");
     }
 
@@ -76,12 +88,13 @@ public class FoliaCompatPlugin extends JavaPlugin implements Listener {
     public void onDisable() {
         getLogger().info("FoliaCompat disabling - cleaning up...");
 
-        // 取消所有注册任务
+        // Cancel all registered tasks
         CompatSchedulerHolder.shutdown();
 
-        // 清理缓存和状态
+        // Clean up caches and state
         CrossRegionEntityBridge.clearAllCache();
         GlobalStateStore.clearAll();
+        ScoreboardCompat.clearCache();
 
         getLogger().info("FoliaCompat disabled.");
     }
@@ -95,20 +108,24 @@ public class FoliaCompatPlugin extends JavaPlugin implements Listener {
             enableThreadSafeState = getConfig().getBoolean("modules.thread-safe-state", true);
             enableEntityBridge = getConfig().getBoolean("modules.entity-bridge", true);
             enableMainThreadProxy = getConfig().getBoolean("modules.main-thread-proxy", true);
+            enableScoreboardCompat = getConfig().getBoolean("modules.scoreboard-compat", true);
+            enableThreadContextBridge = getConfig().getBoolean("modules.thread-context-bridge", true);
 
             getLogger().info("Modules:");
             getLogger().info("  Scheduler Compat: " + (enableSchedulerCompat ? "ON" : "OFF"));
             getLogger().info("  Thread-Safe State: " + (enableThreadSafeState ? "ON" : "OFF"));
             getLogger().info("  Entity Bridge: " + (enableEntityBridge ? "ON" : "OFF"));
             getLogger().info("  MainThread Proxy: " + (enableMainThreadProxy ? "ON" : "OFF"));
+            getLogger().info("  Scoreboard Compat: " + (enableScoreboardCompat ? "ON" : "OFF"));
+            getLogger().info("  Thread Context Bridge: " + (enableThreadContextBridge ? "ON" : "OFF"));
         } catch (Exception e) {
-            getLogger().log(Level.WARNING, "Failed to load configuration", e);
+            getLogger().log(java.util.logging.Level.WARNING, "Failed to load configuration", e);
         }
     }
 
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent event) {
-        // 玩家退出时只清理该玩家的缓存实体引用
+        // Clean up cached entity references when player quits
         CrossRegionEntityBridge.evict(event.getPlayer().getUniqueId());
     }
 
@@ -146,7 +163,7 @@ public class FoliaCompatPlugin extends JavaPlugin implements Listener {
             getLogger().info("All Bukkit.getScheduler() calls will now use CompatScheduler.");
 
         } catch (Exception e) {
-            getLogger().log(Level.WARNING, "Failed to inject CompatScheduler: " + e.getMessage());
+            getLogger().log(java.util.logging.Level.WARNING, "Failed to inject CompatScheduler: " + e.getMessage());
         }
     }
 
@@ -169,7 +186,7 @@ public class FoliaCompatPlugin extends JavaPlugin implements Listener {
     }
 
     /**
-     * 检查指定模块是否启用。
+     * Check if a module is enabled.
      */
     public boolean isModuleEnabled(String module) {
         return switch (module) {
@@ -177,6 +194,8 @@ public class FoliaCompatPlugin extends JavaPlugin implements Listener {
             case "thread-safe-state" -> enableThreadSafeState;
             case "entity-bridge" -> enableEntityBridge;
             case "main-thread-proxy" -> enableMainThreadProxy;
+            case "scoreboard-compat" -> enableScoreboardCompat;
+            case "thread-context-bridge" -> enableThreadContextBridge;
             default -> true;
         };
     }

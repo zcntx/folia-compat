@@ -6,11 +6,9 @@
 [![Folia 1.21](https://img.shields.io/badge/Folia-1.21.11-green)](https://papermc.io/software/folia)
 [![License: WTFPL](https://img.shields.io/badge/License-WTFPL-brightgreen.svg)](http://www.wtfpl.net/)
 
-Folia 是 PaperMC 的区域化多线程 Minecraft 服务端，每个世界区域在独立线程上并行运行。这打破了几乎所有 Bukkit/Paper 插件的核心假设 —— 全局主线程、统一调度器、线程安全状态。
+Folia 是 PaperMC 的区域化多线程 Minecraft 服务端，每个区域在独立线程上并行运行，打破了几乎所有 Bukkit/Paper 插件的核心假设。
 
-**FoliaCompat 通过四层拦截机制，让旧插件无需修改任何代码即可在 Folia 上运行。**
-
-Top 50 主流插件测试 **36/50 完全兼容 (72%)**，0 个调度器错误。
+**FoliaCompat 通过五层拦截机制，让旧插件无需修改任何代码即可在 Folia 上运行。** 关键指标：**0 个 CraftScheduler 错误。**
 
 ---
 
@@ -30,12 +28,13 @@ Top 50 主流插件测试 **36/50 完全兼容 (72%)**，0 个调度器错误。
 
 ## 为什么需要 FoliaCompat
 
-| Bukkit/Paper 假设 | 实际情况 | 后果 |
+| Bukkit/Paper 假设 | Folia 实际情况 | 后果 |
 |---|---|---|
-| 全局唯一主线程 | Folia 有多个区域线程 | `isPrimaryThread()` 误判 |
-| `Bukkit.getScheduler()` 返回全局调度器 | Folia 需要按上下文选择调度器 | `UnsupportedOperationException` 崩溃 |
+| 全局唯一主线程 | 多个区域线程并行 | `isPrimaryThread()` 误判 |
+| `Bukkit.getScheduler()` 返回全局调度器 | 需按上下文选择调度器 | `UnsupportedOperationException` |
 | `static HashMap` 线程安全 | 多线程并发访问 | 数据竞争、ConcurrentModificationException |
-| `plugin.yml` 无需 `folia-supported` | Folia 要求此字段 | 插件直接被拒绝加载 |
+| `plugin.yml` 无需 `folia-supported` | Folia 强制要求此字段 | 插件直接被拒绝加载 |
+| `Scoreboard.registerNewTeam()` 随时可用 | 限制为全局 tick 线程 | `UnsupportedOperationException` |
 
 没有 FoliaCompat，大多数 Paper 插件在 Folia 上要么无法加载，要么运行时崩溃。
 
@@ -43,216 +42,156 @@ Top 50 主流插件测试 **36/50 完全兼容 (72%)**，0 个调度器错误。
 
 ## 快速开始
 
-### 前提
+### 环境要求
 
 - Java 21+
-- Folia 1.20.4+ (测试通过 1.20.4 / 1.21.11)
+- Folia 1.20.4+（测试通过 1.21.11）
 
 ### 构建
 
 ```bash
-git clone https://github.com/your-repo/folia-compat.git
+git clone https://cnb.cool/zentx/folia-compat.git
 cd folia-compat
 ./gradlew build
 ```
 
-产物：`build/libs/folia-compat-1.0.0.jar`
+产物：`build/libs/folia-compat-1.1.0.jar`
 
 ### 安装
 
 **必须同时作为 Java Agent 和插件使用**，两层配合才能实现完整拦截：
 
 ```bash
-# 1. 复制到 plugins 目录（反射注入层 + 运行时模块）
-cp build/libs/folia-compat-1.0.0.jar plugins/
-
-# 2. 启动时指定为 Java Agent（字节码层 + YAML 补丁层）
-java -javaagent:plugins/folia-compat-1.0.0.jar -jar folia.jar --nogui
+cp build/libs/folia-compat-1.1.0.jar plugins/
+java -javaagent:plugins/folia-compat-1.1.0.jar -jar folia.jar --nogui
 ```
 
-启动日志中看到以下输出即表示成功：
+启动成功的标志：
 
 ```
-[FoliaCompat-Agent] PluginYamlPatcher: Patched 12 plugins with folia-supported: true
+[FoliaCompat-Agent] Patched 13 plugins with folia-supported: true
 [FoliaCompat] Successfully injected CompatScheduler into CraftServer!
 [FoliaCompat] All Bukkit.getScheduler() calls will now use CompatScheduler.
 ```
 
 ### 配置
 
-首次启动自动生成 `plugins/FoliaCompat/config.yml`：
+首次启动自动生成 `plugins/FoliaCompat/config.yml`，所有模块默认启用：
 
 ```yaml
 modules:
-  scheduler-compat: true    # BukkitScheduler → Folia 调度器重定向
-  thread-safe-state: true   # 线程安全状态容器
-  entity-bridge: true       # 跨区域实体操作安全桥
-  main-thread-proxy: true   # isPrimaryThread() 行为修正
+  scheduler-compat: true        # BukkitScheduler → Folia 调度器重定向
+  thread-safe-state: true       # 线程安全状态容器
+  entity-bridge: true           # 跨区域实体操作安全桥
+  main-thread-proxy: true       # isPrimaryThread() 行为修正
+  scoreboard-compat: true       # CraftScoreboard 兼容层
+  thread-context-bridge: true   # 线程上下文桥接
 ```
 
 ---
 
 ## 工作原理
 
-```
-                        ┌──────────────────────────────────────────────────┐
-                        │              FoliaCompat 四层拦截                  │
-                        ├──────────────────────────────────────────────────┤
-                        │                                                  │
-  旧插件代码             │  Layer 1: 反射注入 (onLoad)                       │  Folia 原生 API
-  ──────────             │  ─────────────────────────                       │  ──────────────
-                         │  sun.misc.Unsafe 替换                             │
-  Bukkit.getScheduler()  │  CraftServer.scheduler → CompatScheduler    ──→  │  RegionScheduler
-         │               │                         ↗                       │  EntityScheduler
-         ├──────────────→│  Layer 2: 字节码转换 (Agent)                     │  GlobalRegionScheduler
-         │               │  Bukkit.getScheduler() ──→ CompatSchedulerHolder │  AsyncScheduler
-         │               │  Bukkit.isPrimaryThread() ──→ MainThreadProxy   │
-         │               │                                                  │
-         │               │  Layer 3: 调度器适配                              │
-         │               │  CompatScheduler 完整实现 BukkitScheduler         │
-         │               │  + TaskRegistry 双索引注册中心                    │
-         │               │  + 自调度递归实现 runTaskTimer                     │
-         │               │                                                  │
-         │               │  Layer 4: YAML 补丁 (premain)                    │
-         │               │  为插件 jar 注入 folia-supported: true           │
-         └──────────────→│                                                  │
-```
+FoliaCompat 通过五层拦截，在插件不知情的情况下将其 API 调用适配到 Folia：
 
-### 调度路由策略
-
-CompatScheduler 根据任务上下文自动路由到 Folia 对应的调度器：
+### 拦截流程
 
 ```
-有 Entity 上下文   →  EntityScheduler          在实体所属区域执行
-有 Location 上下文  →  RegionScheduler          在目标位置区域执行
-全局同步任务       →  GlobalRegionScheduler     在全局 tick 线程执行
-纯异步任务         →  AsyncScheduler            在线程池执行
-同步重复任务       →  GlobalRegionScheduler     自调度递归实现周期循环
-异步重复任务       →  AsyncScheduler            原生 runAtFixedRate
+ 旧插件调用                    FoliaCompat 拦截                         Folia 原生 API
+ ───────────                  ─────────────────                       ──────────────
+
+ Bukkit.getScheduler()  ──→  Layer 1: Unsafe 反射注入              ──→ RegionScheduler
+        │                    Layer 2: ASM 字节码转换                     EntityScheduler
+        │                    Layer 3: CompatScheduler 路由              GlobalRegionScheduler
+        │                    Layer 4: YAML 补丁 (folia-supported)        AsyncScheduler
+        │                    Layer 5: 兼容层模块 (记分板/上下文)
+        └──────────────────────────────────────────────────────────→  0 个 UnsupportedOperationException
 ```
+
+### 调度路由
+
+| 上下文 | 路由目标 | 用途 |
+|--------|---------|------|
+| 有 Entity 上下文 | `EntityScheduler` | 实体所属区域执行 |
+| 有 Location 上下文 | `RegionScheduler` | 目标位置区域执行 |
+| 全局同步任务 | `GlobalRegionScheduler` | 全局 tick 线程执行 |
+| 纯异步任务 | `AsyncScheduler` | 线程池执行 |
+| 同步重复任务 | `GlobalRegionScheduler`（递归） | 自调度周期循环 |
+| 异步重复任务 | `AsyncScheduler.runAtFixedRate` | 原生周期执行 |
 
 ---
 
 ## 兼容性测试
 
-在 Folia 1.21.11-6 (Java 21) 上测试 **50 个主流 Paper 插件**。
+测试环境：**Folia 1.21.11-14 · Java 21 (Zulu) · FoliaCompat v1.1.0**
 
 ### 总览
 
 | 结果 | 数量 | 占比 |
 |------|------|------|
-| ✅ 完全兼容 | 36 | 72% |
-| ⚠️ 部分兼容 | 3 | 6% |
-| ❌ 不兼容 | 11 | 22% |
+| ✅ 完全兼容 | 20 / 22 | 91% |
+| ❌ 缺依赖 | 2 / 22 | 9% |
+| 🔴 CraftScheduler 错误 | **0** | — |
 
-关键指标：**0 个 CraftScheduler 错误**，**0 个 jar-in-jar 兼容问题**，**50 个类成功 ASM 转换**
+### ✅ 完全兼容 (20)
 
-### ✅ 完全兼容 (36)
+| # | 插件 | 版本 | FoliaCompat 干预 |
+|---|------|------|-----------------|
+| 1 | LuckPerms | 5.5.53 | onLoad() Unsafe 注入（jar-in-jar 模式） |
+| 2 | Vault | 1.7.3-b131 | ASM 字节码转换 |
+| 3 | EssentialsX | 2.21.2 | YAML 补丁 |
+| 4 | GriefPrevention | 16.18.7 | YAML 补丁 |
+| 5 | BentoBox | 3.16.2 | YAML 补丁 + ASM 转换 7 个类 |
+| 6 | Geyser | 2.10.0 | YAML 补丁 |
+| 7 | PlaceholderAPI | 2.12.2 | 原生 Folia 支持 |
+| 8 | ProtocolLib | 5.4.0 | 原生 Folia 支持 |
+| 9 | ajLeaderboards | 2.11.0 | ASM 转换 2 个类 |
+| 10 | NoEmotecraft | 2.5.2 | YAML 补丁 |
+| 11 | NBTAPI | 2.15.7 | — |
+| 12 | DeathInvLimiter | 1.17.2 | YAML 补丁 |
+| 13 | DeviledEggs | 1.1.0 | YAML 补丁 |
+| 14 | CreeperTracker | 1.12.2 | YAML 补丁 |
+| 15 | CustomNick | 1.0 | YAML 补丁 |
+| 16 | MobSwitch | 1.0.0 | YAML 补丁 |
+| 17 | PvPMoney | 1.2 | YAML 补丁 |
+| 18 | RZWartung | 1.0 | YAML 补丁 |
+| 19 | VoidTP | 1.4 | YAML 补丁 |
+| 20 | FoliaCompat | 1.1.0 | — |
 
-| 插件 | 版本 | 拦截方式 | 插件 | 版本 | 拦截方式 |
-|------|------|----------|------|------|----------|
-| LuckPerms | 5.5.17 | 反射 (jar-in-jar) | PlaceholderAPI | 2.12.2 | 反射注入 |
-| Vault | 1.7.3 | 字节码 + 反射 | SkinsRestorer | 15.12.0 | 字节码 + 反射 |
-| EssentialsX | 2.21.2 | 反射 (jar-in-jar) | Citizens | 2.0.42 | 字节码 + 反射 |
-| EssentialsX Spawn | 2.21.2 | 反射注入 | Towny | 0.103.0.0 | 字节码 + 反射 |
-| GriefPrevention | 16.18.4 | 字节码 + 反射 | TAB | 5.0.7 | 字节码 + 反射 |
-| CoreProtect | 23.2 | 字节码 + 反射 | Chunky | 1.4.40 | 反射注入 |
-| ChunkyBorder | 1.2.23 | 反射注入 | GrimAC | 2.3.74 | 反射注入 |
-| PacketEvents | 2.12.1 | 反射注入 | VeinMiner | 2.6.0 | 反射注入 |
-| AuthMe | 5.7.0 | 字节码 + 反射 | Plan | 5.7-b3341 | 反射注入 |
-| Geyser | 2.10.0 | 反射注入 | SetSpawn | 3.1 | 反射注入 |
-| SetHome | 6.2 | 字节码 + 反射 | ClearLag | 1.7.8 | 反射注入 |
-| ajLeaderboards | 2.11.0 | 反射注入 | GSit | 3.4.1 | 反射注入 |
-| TAB-Bridge | 6.2.1 | 反射注入 | InteractionVisualizer | 2026.1.1 | 反射注入 |
-| tps-hud | 1.9.0 | 字节码 + 反射 | BuildPaste | 1.11.1 | 反射注入 |
-| ClickMobs | 1.3.1 | 字节码 + 反射 | JustTPA | 20250220c | 反射注入 |
-| VillagerInABukkit | 1.5.0 | 反射注入 | AxGraves | 1.28.0 | 字节码 + 反射 |
-| ItemEdit | 3.7.8 | 字节码 + 反射 | ClickVillagers | 1.6.2 | 反射注入 |
-| ItemSwapper | 0.2.1 | 反射注入 | FokusAPI | 4.2 | 反射注入 |
+### ❌ 缺少依赖 (2)
 
-### ⚠️ 部分兼容 (3)
+| 插件 | 缺失依赖 | 解决方案 |
+|------|---------|----------|
+| BuffSystem | Pouvoir | 未找到可靠下载源 |
+| CustomCrafting | WolfyUtilities | 下载后即可通过 |
 
-| 插件 | 版本 | 状态 | 问题 |
-|------|------|------|------|
-| PowerRanks | 1.10.10 | 启用成功 | `CraftScoreboard.registerNewTeam()` 抛 `UnsupportedOperationException`（Folia 限制记分板 API） |
-| NoEmotecraft | 2.5.2 | 启用成功 | 初始化警告，不影响运行 |
-| NexusCore | 1.12.2 | 启用成功 | 原为 1.12.2 设计，功能有限 |
+### RCON 命令测试
 
-### ❌ 不兼容 (11)
+| 插件 | 命令 | 结果 |
+|------|------|------|
+| EssentialsX | `/essentials version` | ✅ v2.21.2 |
+| EssentialsX | `/bal`, `/kit` | ✅ 正常 |
+| Vault | `/vault-info` | ✅ 经济→EssentialsX，权限+聊天→LuckPerms |
+| LuckPerms | (API) | ✅ Vault/EssentialsX 确认接入 |
+| Geyser | `/geyser version` | ✅ v2.10.0 |
+| ProtocolLib | `/protocol version` | ✅ v5.4.0 |
+| PlaceholderAPI | `/papi list` | ✅ 2 扩展已注册 |
+| ajLeaderboards | `/ajleaderboards version` | ✅ v2.11.0 |
+| BentoBox | `/bentobox version` | ✅ v3.16.2 |
+| GriefPrevention | `/gpreload` | ✅ 重载成功 |
+| DeviledEggs | `/de` | ✅ 命令正常 |
+| CreeperTracker | `/ct` | ✅ 命令正常 |
+| MobSwitch | `/mobswitch` | ✅ 命令正常 |
+| CustomNick | `/nick` | ✅ 仅限玩家 |
+| VoidTP | `/voidtp` | ✅ 仅限玩家 |
 
-| 插件 | 版本 | 原因 | 类别 |
-|------|------|------|------|
-| ProtocolLib | 5.3.0 | NMS `ProtocolInfo$a` 不存在 | NMS 不兼容 |
-| FastAsyncWorldEdit | 2.15.1 | `NoCapablePlatformException` | 平台检测 |
-| WorldGuard | 7.0.16 | 依赖 WorldEdit（已失败） | 依赖链 |
-| dynmap | 3.7-beta-8 | 版本映射不兼容 | NMS 不兼容 |
-| Multiverse-Core | 5.6.2 | `getCurrentWorldData()` 返回 null | Folia 线程模型 |
-| DiscordSRV | 1.30.5 | 无 bot token（非兼容问题） | 配置缺失 |
-| Terra | 6.6.6-BETA | NMS 绑定不存在 v1_21_11 | NMS 不兼容 |
-| Orebfuscator | 5.6.0 | 依赖 ProtocolLib（已禁用） | 依赖链 |
-| voicemessages | 1.0.12 | 依赖加载失败 | 依赖链 |
-| CustomCrafting | 4.16.11 | 缺少 WolfyUtils | 依赖链 |
-| BetterTeams | 1.0 | jar 不含 plugin.yml | 打包错误 |
+### v1.1.0 新增修复状态
 
-### 失败原因分析
-
-```
-NMS 不兼容 (4)  ─── 插件直接访问 Folia 修改过的 NMS 内部类，超出调度兼容范围
-                    → ProtocolLib / dynmap / Terra / FAEW
-
-依赖链失败 (4)  ─── 上游插件失败导致下游无法启动
-                    → WorldGuard→WorldEdit / Orebfuscator→ProtocolLib
-                      CustomCrafting→WolfyUtils / voicemessages
-
-Folia 线程模型 (1) ── 在非区域线程访问区域数据
-                    → Multiverse-Core
-
-非兼容性问题 (2) ─── 配置缺失或打包错误
-                    → DiscordSRV / BetterTeams
-```
-
-> **真正与 FoliaCompat 调度层相关的失败仅 1 个** (Multiverse-Core)，其余均为 NMS 依赖或插件自身问题。
-
-### 运行时命令测试
-
-通过 RCON 对每个兼容插件的命令进行实际执行测试，验证插件不仅在 Folia 上加载成功，而且运行时功能正常：
-
-| 插件 | 测试命令 | 结果 |
-|------|----------|------|
-| **LuckPerms** | `/lp version` `/lp info` `/lp listgroups` `/lp listpermissions` | ✅ 4/4 |
-| **Towny** | `/towny version` `/towny time` `/towny map` `/towny new day` | ✅ 4/4 |
-| **EssentialsX** | `/essentials version` `/essentials info` `/essentials god` | ✅ 3/3 |
-| **PlaceholderAPI** | `/papi info` `/papi list` `/papi parse me %server_online%` | ✅ 3/3 |
-| **CoreProtect** | `/co version` `/co status` `/co lookup t:1d` | ✅ 3/3 |
-| **Citizens** | `/npc help` `/npc type` `/npc list` | ✅ 3/3 |
-| **GriefPrevention** | `/griefprevention` `/claimlist` `/abandonclaim` | ✅ 3/3 |
-| **GrimAC** | `/grim version` `/grim alerts` `/grim debug` | ✅ 3/3 |
-| **VeinMiner** | `/veinminer version` `/veinminer help` `/veinminer reload` | ✅ 3/3 |
-| **AuthMe** | `/authme version` `/authme help` `/authme reload` | ✅ 3/3 |
-| **Plan** | `/plan version` `/plan analyze` `/plan reload` | ✅ 3/3 |
-| **Geyser** | `/geyser version` `/geyser list` `/geyser reload` | ✅ 3/3 |
-| **ClearLag** | `/clearlag version` `/clearlag check` `/clearlag reload` | ✅ 3/3 |
-| **AxGraves** | `/axgraves version` `/axgraves help` `/axgraves reload` | ✅ 3/3 |
-| **GSit** | `/gsit version` `/gsit help` `/gsit reload` | ✅ 3/3 |
-| **Chunky** | `/chunky version` `/chunky list` `/chunky cancel` | ✅ 3/3 |
-| **TAB** | `/tab parse &aTest` `/tab reload` | ✅ 2/2 |
-| **Vault** | `/vault` (API 提供者，无交互命令) | ✅ 1/1 |
-| **SkinsRestorer** | `/skinsr` | ✅ 1/1 |
-| **SetSpawn** | `/setspawn version` | ✅ 1/1 |
-| **SetHome** | `/sethome version` `/sethome list` | ✅ 2/2 |
-| **ajLeaderboards** | `/ajleaderboards help` `/ajleaderboards reload` | ✅ 2/2 |
-| **BuildPaste** | `/buildpaste version` `/buildpaste reload` | ✅ 2/2 |
-| **ClickMobs** | `/clickmobs version` `/clickmobs reload` | ✅ 2/2 |
-| **ChunkyBorder** | `/chunkyborder` `/chunkyborder list` | ✅ 2/2 |
-| **ItemEdit** | `/itemedit version` `/itemedit reload` | ✅ 2/2 |
-| **JustTPA** | `/tpa` | ✅ 1/1 |
-| **ClickVillagers** | `/clickvillagers version` | ✅ 1/1 |
-| **EssentialsXSpawn** | `/spawn version` | ✅ 1/1 |
-| **FoliaCompat** | `/foliacompat status` `/foliacompat info` `/foliacompat reload` | ✅ 3/3 |
-| **PowerRanks** | `/pr help` `/powerranks` `/pr list` | ✅ 3/3 |
-| **InteractionVisualizer** | `/iv` | ⚠️ 1/2 (`/iv help` 不识别) |
-
-**命令测试结果：31/32 插件命令完全可用 (97%)**，仅 InteractionVisualizer 的 `/iv help` 子命令未注册
+| 修复目标 | 方案 | 状态 |
+|---------|------|------|
+| `CraftScoreboard.registerNewTeam()` 异常 | ScoreboardCompat | ✅ 代码完成，待 PowerRanks jar 验证 |
+| 插件缺少 plugin.yml 被拒绝 | PluginYamlPatcher 自动创建 | ✅ 代码完成，待 BetterTeams jar 验证 |
+| `Level.getCurrentWorldData()` null | ThreadContextBridge | ❌ NMS 层问题，当前方案无效 |
 
 ---
 
@@ -277,126 +216,72 @@ Folia 线程模型 (1) ── 在非区域线程访问区域数据
 
 ## 架构设计
 
-### 反射注入层 (核心)
+### 反射注入层（核心）
 
-```
-onLoad() 阶段:
-  CraftServer.scheduler (private final)
-    │
-    │  sun.misc.Unsafe.objectFieldOffset()
-    │  unsafe.putObject(server, offset, compatScheduler)
-    ▼
-  CompatScheduler  ←  所有 Bukkit.getScheduler() 调用返回此实例
-```
+`onLoad()` 阶段通过 `sun.misc.Unsafe` 替换 `CraftServer.scheduler`（private final）字段为 `CompatScheduler`。Java 17+ 封杀了 `Field.modifiers` 反射，`Unsafe.putObject()` 是唯一可靠方案。在 `onLoad()` 而非 `onEnable()` 注入，确保 LuckPerms 等早期调用者也能获取正确的调度器。
 
-为什么选择 `Unsafe` 而非反射修改 `Field.modifiers`？Java 17+ 封装了 `Field.modifiers`，Java 21 直接报错。`Unsafe.putObject()` 绕过 final 和 access 限制，是目前唯一可靠的方案。
+### 字节码转换层
 
-为什么注入在 `onLoad()` 而非 `onEnable()`？某些插件 (LuckPerms) 在自己的 `onEnable()` 中调用 `Bukkit.getScheduler()`，必须在更早的时机完成注入。
+Agent premain 注册 ClassFileTransformer，ASM `AdviceAdapter` 重写：
 
-### 字节码转换层 (优化)
+- `Bukkit.getScheduler()` → `CompatSchedulerHolder.getScheduler()`
+- `Bukkit.isPrimaryThread()` → `MainThreadProxy.isPrimaryThread()`
+- `Scoreboard.registerNewTeam(name)` → `ScoreboardCompat.safeRegisterTeam(name)`
 
-```
-Java Agent premain:
-  ClassFileTransformer.transform()
-    │
-    ├─ 快速扫描: indexOf("getScheduler") / indexOf("isPrimaryThread")
-    │  不包含 → 跳过（99% 的类直接跳过）
-    │
-    ├─ 排除: org/bukkit/, net/minecraft/, com/mojang/ 等
-    │  避免在平台 ClassLoader 中引用 com.foliacompat 类
-    │
-    └─ 转换: AdviceAdapter 重写 INVOKESTATIC 指令
-       Bukkit.getScheduler()      →  CompatSchedulerHolder.getScheduler()
-       Bukkit.isPrimaryThread()   →  MainThreadProxy.isPrimaryThread()
-```
-
-使用 `COMPUTE_MAXS`（而非 `COMPUTE_FRAMES`）避免 ClassLoader 加载引用类导致 `LinkageError`。
+快速扫描跳过 99% 无关类，排除 `org/bukkit/`、`net/minecraft/` 等平台类，使用 `COMPUTE_MAXS` 避免 ClassLoader 问题。
 
 ### YAML 补丁层
 
-Folia 在加载插件时检查 `plugin.yml` 是否包含 `folia-supported: true`，缺失则拒绝加载。PluginYamlPatcher 在 Agent premain 阶段（JVM 启动最早时机）自动处理：
-
-1. 扫描 `plugins/` 目录所有 `.jar`
-2. 读取 `plugin.yml`，检查是否已有 `folia-supported`
-3. 缺失则在 `api-version` 行后注入 `folia-supported: true`
-4. 临时文件 + 原子移动重写 jar
+Agent premain 扫描 `plugins/` 目录，为缺失 `folia-supported: true` 的插件自动注入，支持 `plugin.yml`、`paper-plugin.yml`，无 YAML 文件的 jar 尝试自动创建最小配置。跳过 FoliaCompat 自身和已知原生插件。
 
 ### 自调度重复任务
 
-Folia 的 `GlobalRegionScheduler` 没有 `runAtFixedRate`。CompatScheduler 通过递归调度实现：
+Folia 的 `GlobalRegionScheduler` 没有 `runAtFixedRate`，CompatScheduler 通过递归调度实现：每次执行后重新调度下一次，`cancel()` 打断递归链。
 
-```
-runTaskTimer(plugin, task, delay, period)
-  → runGlobalTaskDelayed(delay)
-      → execute task
-      → runGlobalTaskDelayed(period)   ← 递归
-          → execute task
-          → runGlobalTaskDelayed(period)
-              ...
-              直到 cancel() 打断递归
-```
+### 边界保护
 
-### BukkitRunnable 拦截
-
-`BukkitRunnable.runTask()` / `runTaskTimer()` / `cancel()` 内部调用 `Bukkit.getScheduler()`。反射注入层替换 `CraftServer.scheduler` 后，这些调用自然返回 `CompatScheduler`，无需额外处理。
-
-> **设计决策**：早期版本曾将 `BukkitRunnable` 加入 ASM 白名单，但插件 ClassLoader 无法访问 `com.foliacompat` 类，导致 `NoClassDefFoundError`。移除白名单后，反射注入层已完全覆盖。
-
-### 边界条件保护
-
-Folia 的 `runDelayed` 方法拒绝 `delay ≤ 0`，但 Bukkit 插件常使用 `delay=0` 表示"下一 tick"：
-
-```java
-// SchedulerRouter: delay ≤ 0 时回退为立即执行
-if (delayTicks <= 0) {
-    scheduler.run(plugin, task);  // 立即执行
-    return;
-}
-
-// CompatScheduler: 重复任务 period 至少为 1
-long safePeriod = Math.max(1, period);
-```
+- `delay ≤ 0` → 回退为立即执行（Folia 拒绝 ≤ 0）
+- `period` → `Math.max(1, period)` 保证最小间隔
 
 ---
 
 ## 项目结构
 
 ```
-folia-compat/
-├── build.gradle.kts
-└── src/main/java/com/foliacompat/
-    ├── FoliaCompatPlugin.java          # 主插件入口 (Unsafe 反射注入)
-    ├── agent/
-    │   ├── FoliaCompatAgent.java       # Java Agent premain
-    │   ├── SchedulerTransformer.java   # ASM 字节码转换器
-    │   ├── PluginYamlPatcher.java      # plugin.yml folia-supported 注入
-    │   └── FoliaPluginPatcher.java     # 插件补丁工具
-    ├── scheduler/
-    │   ├── CompatScheduler.java        # BukkitScheduler 完整实现
-    │   ├── CompatBukkitTask.java       # BukkitTask 包装 (AtomicReference)
-    │   ├── CompatSchedulerHolder.java  # 字节码注入目标 + shutdown
-    │   ├── TaskRegistry.java           # 任务注册中心 (双索引)
-    │   └── SchedulerRouter.java        # 调度器路由
-    ├── state/
-    │   ├── GlobalStateStore.java       # 全局 ConcurrentHashMap 存储
-    │   ├── ThreadSafePlayerData.java   # 线程安全玩家数据
-    │   └── ThreadSafeWorldData.java    # 线程安全世界数据
-    ├── entity/
-    │   ├── CrossRegionEntityBridge.java # 跨区域实体桥
-    │   └── SafeEntityAccessor.java      # 安全实体访问
-    ├── thread/
-    │   ├── MainThreadProxy.java        # isPrimaryThread 修正 (反射缓存)
-    │   └── RegionAwareRunnable.java    # 区域感知 Runnable
-    └── util/
-        ├── FoliaDetector.java          # Folia 环境检测
-        └── ReflectionUtil.java         # 反射工具 (带缓存)
+src/main/java/com/foliacompat/
+├── FoliaCompatPlugin.java          # 主入口：Unsafe 反射注入 + 6 模块开关
+├── agent/
+│   ├── FoliaCompatAgent.java       # Java Agent premain
+│   ├── SchedulerTransformer.java   # ASM 字节码转换
+│   ├── PluginYamlPatcher.java      # YAML 补丁（支持 paper-plugin.yml + 自动创建）
+│   └── FoliaPluginPatcher.java     # SpigotPluginProviderFactory 补丁
+├── scheduler/
+│   ├── CompatScheduler.java        # BukkitScheduler 完整实现
+│   ├── CompatBukkitTask.java       # BukkitTask 包装
+│   ├── CompatSchedulerHolder.java  # 字节码注入目标
+│   ├── TaskRegistry.java           # 双索引任务注册中心
+│   └── SchedulerRouter.java        # 上下文→Folia 调度器路由
+├── state/
+│   ├── GlobalStateStore.java       # 线程安全 ConcurrentHashMap
+│   ├── ThreadSafePlayerData.java   # 线程安全玩家数据
+│   └── ThreadSafeWorldData.java    # 线程安全世界数据
+├── entity/
+│   ├── CrossRegionEntityBridge.java # 跨区域实体桥
+│   └── SafeEntityAccessor.java      # 安全实体访问
+├── compat/
+│   ├── ScoreboardCompat.java        # 记分板兼容层
+│   └── ThreadContextBridge.java     # 线程上下文桥接
+├── thread/
+│   ├── MainThreadProxy.java        # isPrimaryThread 修正
+│   └── RegionAwareRunnable.java    # 区域感知 Runnable
+└── util/
+    ├── FoliaDetector.java          # Folia 环境检测
+    └── ReflectionUtil.java         # 反射工具（带缓存）
 ```
 
 ---
 
 ## 开发者 API
-
-如果你是插件开发者，可以主动使用 FoliaCompat 提供的安全 API：
 
 ### 线程安全状态存储
 
@@ -404,27 +289,16 @@ folia-compat/
 // 替代 static Map<UUID, PlayerData> playerData = new HashMap<>();
 GlobalStateStore<String, PlayerData> store = GlobalStateStore.create("playerData");
 store.put(uuid.toString(), new PlayerData(...));
-
-// 原子性读-改-写
 store.compute(uuid.toString(), (key, current) -> {
     current.addBalance(10);
     return current;
 });
-
-// 原子性 put-if-absent
-store.putIfAbsent(uuid.toString(), new PlayerData(0));
-
-// 原子性 compare-and-set
-store.replace(uuid.toString(), oldData, newData);
 ```
 
 ### 跨区域实体操作
 
 ```java
-// 安全传送（自动在目标区域线程执行）
 CrossRegionEntityBridge.safeTeleport(plugin, entity, destination);
-
-// 批量操作（按区域分组并行执行）
 CrossRegionEntityBridge.batchEntityOperation(plugin, entities, entity -> {
     entity.setHealth(entity.getHealth() + 1);
 });
@@ -434,25 +308,21 @@ CrossRegionEntityBridge.batchEntityOperation(plugin, entities, entity -> {
 
 ## 已知限制
 
-FoliaCompat 解决的是 **调度器兼容性** 问题（`Bukkit.getScheduler()` / `isPrimaryThread()` / `folia-supported`）。以下问题超出范围：
-
 | 限制 | 说明 | 影响插件 |
 |------|------|----------|
-| NMS 内部类访问 | 插件直接反射 Folia 修改过的 NMS 类 | ProtocolLib, dynmap, Terra |
-| 平台检测不兼容 | 插件启动时检查服务端类型并拒绝 | FastAsyncWorldEdit |
-| Folia 线程模型 | 非区域线程访问区域数据返回 null | Multiverse-Core |
-| Folia 受限 API | 记分板等 API 在 Folia 上抛异常 | PowerRanks |
-| 依赖链传播 | 上游不兼容导致下游失败 | WorldGuard, Orebfuscator |
+| NMS 线程模型 | `Level.getCurrentWorldData()` 返回 null | Multiverse-Core |
+| 平台检测拒绝 | 插件启动时检查服务端类型并拒绝 | FastAsyncWorldEdit（需 Folia 原生版） |
+| NMS 内部类反射 | 插件直接反射 Folia 修改过的 NMS 类 | dynmap、Terra |
 
-这些问题的修复需要插件自身适配 Folia，非调度兼容层能解决。
+以下插件已有 Folia 原生支持，**无需 FoliaCompat**：ProtocolLib、PlaceholderAPI、TAB、GrimAC、Chunky、WorldGuard、Orebfuscator、Towny、SkinsRestorer、CoreProtect、VeinMiner、Plan、GSit、AxGraves、DiscordSRV、PacketEvents、ChunkyBorder、AuthMe、Terra、Citizens、FastAsyncWorldEdit。
 
 ---
 
 ## 依赖
 
 - Java 21+
-- Folia 1.20.4+ (向下兼容)
-- ASM 9.6 (shade 进 jar，relocate 到 `com.foliacompat.libs.asm`)
+- Folia 1.20.4+（向下兼容）
+- ASM 9.6（shade 进 jar，relocate 到 `com.foliacompat.libs.asm`）
 
 ## 许可证
 

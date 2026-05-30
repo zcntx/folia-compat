@@ -20,3 +20,6 @@ Thumbs.db
 # Logs
 *.log
 DEVELOPMENT_CONTEXT.md
+
+# Test server
+server/

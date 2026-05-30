@@ -3,3 +3,5 @@ modules:
   thread-safe-state: true
   entity-bridge: true
   main-thread-proxy: true
+  scoreboard-compat: true
+  thread-context-bridge: true
